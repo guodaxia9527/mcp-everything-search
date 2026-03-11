@@ -232,6 +232,11 @@ def search_everything(args):
     
     p = parse_structured_params(args, args.get("raw_args", ""))
     
+    # PERFORMANCE WARNING: Guide the model if it's being inefficient
+    perf_prefix = ""
+    if p["limit"] > 1000:
+        perf_prefix = "WARNING: Requesting a large result limit is inefficient for AI. For counting or finding top folders, ALWAYS use 'everything_stats' instead.\n\n"
+
     v = sdk.get_version()
     if v[0] >= 1 and v[1] >= 5:
         if "folder:" in query_text or (p["sort"] in [EVERYTHING_SORT_SIZE_ASCENDING, EVERYTHING_SORT_SIZE_DESCENDING]):
@@ -241,26 +246,27 @@ def search_everything(args):
     
     # --- ENHANCED DIAGNOSTICS & SELF-HEALING ---
     if num_results == 0:
-        # 1. Indexing coverage check
+        # 1. Drive check
         path_hint = args.get("path", "").upper()
         if path_hint and ":" in path_hint:
             drive = path_hint.split(":")[0] + ":"
-            # Quick test: search for anything on that drive
-            if sdk.query_raw(f"path:\"{drive}\"") == 0:
-                return f"ERROR: Drive {drive} is NOT indexed by Everything. Please add it in Everything Options -> Indexes -> NTFS/Folders, or use the 'glob' tool for this specific path. (Search: {query_text})"
+            if sdk.query_raw(f"path:\"{drive}\" limit:1") == 0:
+                return f"ERROR: Drive {drive} is NOT indexed. Please add it in Everything Options -> Indexes -> NTFS/Folders.\nTip: If you need to search an unindexed path, use the 'glob' or 'ls' tool."
 
-        # 2. Global fallback
-        raw_filename = args.get("filename", "").strip()
-        if raw_filename and (args.get("path") or args.get("extension")):
-            fuzzy_filename = f"*{raw_filename}*" if "*" not in raw_filename else raw_filename
-            num_results = sdk.query_raw(fuzzy_filename, sort_type=p["sort"], request_flags=p["flags"])
-            if num_results > 0:
-                hint = f"Note: No matches in specified path/extension. Found {num_results} similar files in OTHER indexed locations:\n"
-                return hint + render_results(num_results, p)
-
-        return f"No files found matching the criteria: '{query_text}'. Tip: If the file exists, ensure its drive is indexed in Everything."
+        # 2. Expert Advice for AI
+        advice = [f"Found 0 results for: '{query_text}'."]
+        if "*" in query_text: advice.append("Hint: Try removing wildcards (*) as Everything uses fuzzy matching by default.")
+        if args.get("path") or args.get("extension"):
+            # Check if name exists anywhere else
+            raw_name = args.get("filename", "") or args.get("query", "")
+            if raw_name and raw_name != "*":
+                alt_count = sdk.query_raw(raw_name.replace("*", ""), limit=1)
+                if alt_count > 0:
+                    advice.append(f"Note: This file exists in OTHER locations (unfiltered search found {alt_count} matches). Try removing path/extension filters.")
+        
+        return "\n".join(advice)
     
-    return render_results(num_results, p)
+    return perf_prefix + render_results(num_results, p)
 
 def render_results(num_results, p):
     actual_limit = min(num_results, p["limit"])
@@ -331,28 +337,45 @@ def send_json(data):
     sys.stdout.write(json.dumps(data) + "\n")
     sys.stdout.flush()
 
+def get_engine_status():
+    if not sdk.ensure_engine(ENGINE_PATHS): return "Engine NOT running."
+    v = sdk.get_version()
+    # Find all indexed drives
+    drives = []
+    for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if sdk.query_raw(f"path:\"{d}:\\\" limit:1") > 0:
+            drives.append(f"{d}:")
+    
+    total = sdk.query_raw("*")
+    return {
+        "version": f"{v[0]}.{v[1]}",
+        "indexed_drives": drives,
+        "total_files": total,
+        "status": "Healthy"
+    }
+
 def handle_request(request):
     req_id = request.get("id")
     method = request.get("method")
     
     if method == "initialize":
-        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"capabilities": {"tools": {}}, "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.6.0-SMART"}, "protocolVersion": "2024-11-05"}})
+        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"capabilities": {"tools": {}}, "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.6.1-STABLE"}, "protocolVersion": "2024-11-05"}})
     elif method == "tools/list":
         send_json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": [
             {
                 "name": "everything_search", 
-                "description": "Search for specific files by name, path, or extension. Ultra-fast metadata search. DO NOT use this tool for counting files or finding 'top' directories; use 'everything_stats' for that.", 
+                "description": "Find specific files. ULTRA-FAST. Use semantic fields (filename, extension) instead of guessing syntax. DO NOT use this for counting files or finding 'top' folders.", 
                 "inputSchema": {
                     "type": "object", 
                     "properties": {
-                        "query": {"type": "string", "description": "Search query (supports Everything syntax, e.g. 'dm:today')"}, 
-                        "filename": {"type": "string", "description": "Optional: Specific filename part to find (e.g. '爱')"},
-                        "extension": {"type": "string", "description": "Optional: Filter by extension (e.g. 'mp3', 'docx')"},
-                        "path": {"type": "string", "description": "Optional: Restrict to directory (e.g. 'D:\\backup')"},
-                        "limit": {"type": "integer", "description": "Max results to return in this list", "default": 20},
+                        "query": {"type": "string", "description": "Search query. Everything syntax supported (e.g. 'dm:today')."}, 
+                        "filename": {"type": "string", "description": "Preferred: File name part to match (auto-wrapped in *)."},
+                        "extension": {"type": "string", "description": "Preferred: Filter by extension (e.g. 'mp4', 'docx')."},
+                        "path": {"type": "string", "description": "Optional: Restrict to directory (e.g. 'D:\\backup')."},
+                        "limit": {"type": "integer", "description": "Max results. Keep LOW (<100) for efficiency. Do NOT use huge limits to count files.", "default": 20},
                         "sort": {
                             "type": "string", 
-                            "enum": ["name-asc", "name-desc", "path-asc", "path-desc", "size-asc", "size-desc", "extension-asc", "extension-desc", "date-modified-asc", "date-modified-desc"]
+                            "enum": ["name-asc", "name-desc", "path-asc", "path-desc", "size-asc", "size-desc", "date-modified-asc", "date-modified-desc"]
                         },
                         "show_size": {"type": "boolean"},
                         "show_date": {"type": "boolean"},
@@ -362,16 +385,21 @@ def handle_request(request):
             },
             {
                 "name": "everything_stats", 
-                "description": "Essential for 'Top N' queries (e.g., 'largest folders', 'most files'). ALWAYS use this for aggregation and statistical analysis across millions of files. It is 1000x more efficient than manual counting.", 
+                "description": "CRITICAL for 'Top N' or counting tasks (e.g. 'most files', 'largest folders'). 1000x faster than manual counting. ALWAYS use this for aggregation.", 
                 "inputSchema": {
                     "type": "object", 
                     "properties": {
-                        "query": {"type": "string", "description": "Filter files before aggregating. Tip: use '-C:\\Windows' to exclude system noise.", "default": "*"}, 
-                        "group_by": {"type": "string", "enum": ["directory", "extension"]}, 
-                        "sort_by": {"type": "string", "enum": ["count", "size"]}, 
-                        "limit": {"type": "integer", "description": "Max categories to display in the result", "default": 10}
+                        "query": {"type": "string", "description": "Filter before stats. Tip: use '-C:\\Windows' to hide system clutter.", "default": "*"}, 
+                        "group_by": {"type": "string", "enum": ["directory", "extension"], "description": "How to group files."}, 
+                        "sort_by": {"type": "string", "enum": ["count", "size"], "description": "Sort metric."}, 
+                        "limit": {"type": "integer", "description": "Max categories to return.", "default": 10}
                     }
                 }
+            },
+            {
+                "name": "get_engine_status",
+                "description": "Check which drives are currently indexed and engine health.",
+                "inputSchema": {"type": "object", "properties": {}}
             }
         ]}})
     elif method == "tools/call":
@@ -383,8 +411,11 @@ def handle_request(request):
                 result = search_everything(args)
             elif tool_name == "everything_stats":
                 result = get_stats(args.get("query", "*"), args.get("group_by", "directory"), args.get("sort_by", "count"), args.get("limit", 10))
+            elif tool_name == "get_engine_status":
+                result = json.dumps(get_engine_status(), indent=2)
             else: result = f"Unknown tool: {tool_name}"
             send_json({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": result}]}})
+
         except Exception as e:
             logging.error(f"Execution error: {str(e)}")
             send_json({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}})

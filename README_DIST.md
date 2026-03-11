@@ -24,8 +24,9 @@ dist/
 ```
 
 ## 3. 工具列表
-- **everything_search**：根据元数据（名称、路径、后缀）极速找文件。
-- **everything_stats**：分析磁盘空间占用、文件夹大小排名。
+- **everything_search**：根据元数据（名称、路径、后缀）极速找文件。内置 AI 引导逻辑，防止低效搜索。
+- **everything_stats**：分析磁盘空间占用、文件夹大小排名。比手动计数快 1000 倍。
+- **get_engine_status**：查看当前 Everything 索引了哪些盘符以及引擎健康状态。
 
 ## 4. 安装与权限说明
 1. **自动配置**：运行 `install.exe`，它将自动识别路径并注册到 OpenCode。
