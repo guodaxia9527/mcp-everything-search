@@ -341,7 +341,7 @@ def handle_request(request):
         send_json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": [
             {
                 "name": "everything_search", 
-                "description": "Advanced Everything search. Ultra-fast, handles millions of files. Use semantic fields for better accuracy. DO NOT fallback to slow PowerShell commands if this returns nothing.", 
+                "description": "Search for specific files by name, path, or extension. Ultra-fast metadata search. DO NOT use this tool for counting files or finding 'top' directories; use 'everything_stats' for that.", 
                 "inputSchema": {
                     "type": "object", 
                     "properties": {
@@ -349,7 +349,7 @@ def handle_request(request):
                         "filename": {"type": "string", "description": "Optional: Specific filename part to find (e.g. '爱')"},
                         "extension": {"type": "string", "description": "Optional: Filter by extension (e.g. 'mp3', 'docx')"},
                         "path": {"type": "string", "description": "Optional: Restrict to directory (e.g. 'D:\\backup')"},
-                        "limit": {"type": "integer", "description": "Max results", "default": 20},
+                        "limit": {"type": "integer", "description": "Max results to return in this list", "default": 20},
                         "sort": {
                             "type": "string", 
                             "enum": ["name-asc", "name-desc", "path-asc", "path-desc", "size-asc", "size-desc", "extension-asc", "extension-desc", "date-modified-asc", "date-modified-desc"]
@@ -362,14 +362,14 @@ def handle_request(request):
             },
             {
                 "name": "everything_stats", 
-                "description": "High-performance statistics and disk usage analysis.", 
+                "description": "Essential for 'Top N' queries (e.g., 'largest folders', 'most files'). ALWAYS use this for aggregation and statistical analysis across millions of files. It is 1000x more efficient than manual counting.", 
                 "inputSchema": {
                     "type": "object", 
                     "properties": {
-                        "query": {"type": "string", "default": "*"}, 
+                        "query": {"type": "string", "description": "Filter files before aggregating. Tip: use '-C:\\Windows' to exclude system noise.", "default": "*"}, 
                         "group_by": {"type": "string", "enum": ["directory", "extension"]}, 
                         "sort_by": {"type": "string", "enum": ["count", "size"]}, 
-                        "limit": {"type": "integer", "default": 10}
+                        "limit": {"type": "integer", "description": "Max categories to display in the result", "default": 10}
                     }
                 }
             }
