@@ -1,0 +1,17 @@
+# PyInstaller temporary folders
+build/
+dist/
+*.spec
+
+# Everything Engine transient files
+Everything.db
+Everything.ini
+mcp_debug.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local environment
+.vscode/
+.idea/
