@@ -232,10 +232,14 @@ def search_everything(args):
     
     p = parse_structured_params(args, args.get("raw_args", ""))
     
-    # PERFORMANCE WARNING: Guide the model if it's being inefficient
+    # PERFORMANCE WARNING & INTENT INTERCEPTION
     perf_prefix = ""
     if p["limit"] > 1000:
         perf_prefix = "WARNING: Requesting a large result limit is inefficient for AI. For counting or finding top folders, ALWAYS use 'everything_stats' instead.\n\n"
+    
+    # [AUTOPILOT]: Intercept size-based ranking intent
+    if p["sort"] in [EVERYTHING_SORT_SIZE_ASCENDING, EVERYTHING_SORT_SIZE_DESCENDING] and p["limit"] <= 100:
+        perf_prefix += "[SYSTEM GUIDANCE]: Detected size ranking intent. Note that 'everything_search' returns individual files. If you are looking for the 'largest FOLDERS', please use the dedicated 'find_largest_folders' tool for instant, accurate directory aggregation.\n\n"
 
     v = sdk.get_version()
     if v[0] >= 1 and v[1] >= 5:
@@ -246,12 +250,12 @@ def search_everything(args):
     
     # --- ENHANCED DIAGNOSTICS & SELF-HEALING ---
     if num_results == 0:
-        # 1. Drive check
+        # 1. Drive check with Shielding
         path_hint = args.get("path", "").upper()
         if path_hint and ":" in path_hint:
             drive = path_hint.split(":")[0] + ":"
             if sdk.query_raw(f"path:\"{drive}\" limit:1") == 0:
-                return f"ERROR: Drive {drive} is NOT indexed. Please add it in Everything Options -> Indexes -> NTFS/Folders.\nTip: If you need to search an unindexed path, use the 'glob' or 'ls' tool."
+                return f"ERROR: Drive {drive} is NOT indexed. Please add it in Everything Options -> Indexes -> NTFS/Folders.\n[SHIELD]: The disk is too large (millions of files). Standard OS commands (powershell, ls, dir) WILL HANG and TIMEOUT on this system. Please fix the Everything index instead."
 
         # 2. Expert Advice for AI
         advice = [f"Found 0 results for: '{query_text}'."]
@@ -359,7 +363,7 @@ def handle_request(request):
     method = request.get("method")
     
     if method == "initialize":
-        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"capabilities": {"tools": {}}, "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.6.1-STABLE"}, "protocolVersion": "2024-11-05"}})
+        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"capabilities": {"tools": {}}, "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.6.2-AUTOPILOT"}, "protocolVersion": "2024-11-05"}})
     elif method == "tools/list":
         send_json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": [
             {
@@ -389,10 +393,32 @@ def handle_request(request):
                 "inputSchema": {
                     "type": "object", 
                     "properties": {
-                        "query": {"type": "string", "description": "Filter before stats. Tip: use '-C:\\Windows' to hide system clutter.", "default": "*"}, 
+                        "query": {"type": "string", "description": "Filter files before aggregating. Tip: use '-C:\\Windows' to hide system clutter.", "default": "*"}, 
                         "group_by": {"type": "string", "enum": ["directory", "extension"], "description": "How to group files."}, 
                         "sort_by": {"type": "string", "enum": ["count", "size"], "description": "Sort metric."}, 
                         "limit": {"type": "integer", "description": "Max categories to return.", "default": 10}
+                    }
+                }
+            },
+            {
+                "name": "find_largest_folders",
+                "description": "DEPRECATED intent alias: Dedicated tool to find the largest directories on disk. Much faster and more accurate than manual search.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Scope the search to this directory (e.g. 'C:\\')"},
+                        "limit": {"type": "integer", "description": "Number of folders to return", "default": 5}
+                    }
+                }
+            },
+            {
+                "name": "find_most_files",
+                "description": "DEPRECATED intent alias: Find directories containing the highest number of files. Useful for finding file hoards.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Scope the search to this directory (e.g. 'D:\\')"},
+                        "limit": {"type": "integer", "description": "Number of folders to return", "default": 5}
                     }
                 }
             },
@@ -411,10 +437,15 @@ def handle_request(request):
                 result = search_everything(args)
             elif tool_name == "everything_stats":
                 result = get_stats(args.get("query", "*"), args.get("group_by", "directory"), args.get("sort_by", "count"), args.get("limit", 10))
+            elif tool_name == "find_largest_folders":
+                result = get_stats(f"path:\"{args.get('path', '*')}\"", group_by="directory", sort_by="size", limit=args.get("limit", 5))
+            elif tool_name == "find_most_files":
+                result = get_stats(f"path:\"{args.get('path', '*')}\"", group_by="directory", sort_by="count", limit=args.get("limit", 5))
             elif tool_name == "get_engine_status":
                 result = json.dumps(get_engine_status(), indent=2)
             else: result = f"Unknown tool: {tool_name}"
             send_json({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": result}]}})
+
 
         except Exception as e:
             logging.error(f"Execution error: {str(e)}")

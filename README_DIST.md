@@ -7,14 +7,14 @@
 - **极速性能**：通过 `Everything64.dll` 原生调用，绕过命令行解析，全盘统计毫秒级响应。
 - **免安装**：解压即用，一键运行 `install.exe` 自动配置 `opencode.json`。
 - **完美路径**：原生支持 Unicode/UTF-8，彻底解决中文乱码问题。
-- **智能诊断**：自动识别驱动器索引状态，提供环境修复引导。
+- **智能诊断与引导**：自动识别驱动器索引状态，对 Top-N 搜索提供自动引导逻辑，防止 AI 走弯路。
 
 ## 2. 交付包结构 (dist 目录)
 ```text
 dist/
 ├── install.exe        # 一键安装/配置程序
 ├── server/            # MCP 服务核心
-│   ├── server.exe     # MCP 主程序 (v1.6.0-SMART)
+│   ├── server.exe     # MCP 主程序 (v1.6.2-AUTOPILOT)
 │   ├── Everything.exe # 内置极速搜索引擎 (x64 绿色版)
 │   ├── Everything.lng # 引擎多语言支持
 │   ├── Everything64.dll # 原生 SDK 驱动
@@ -24,9 +24,11 @@ dist/
 ```
 
 ## 3. 工具列表
-- **everything_search**：根据元数据（名称、路径、后缀）极速找文件。内置 AI 引导逻辑，防止低效搜索。
-- **everything_stats**：分析磁盘空间占用、文件夹大小排名。比手动计数快 1000 倍。
-- **get_engine_status**：查看当前 Everything 索引了哪些盘符以及引擎健康状态。
+- **everything_search**：根据元数据极速找文件。内置拦截逻辑，引导 AI 使用统计工具。
+- **everything_stats**：全能统计分析。比手动计数快 1000 倍。
+- **find_largest_folders**：(专用) 专门用于查找占用空间最大的文件夹。
+- **find_most_files**：(专用) 专门用于查找包含文件最多的文件夹。
+- **get_engine_status**：查看索引状态与驱动器覆盖范围。
 
 ## 4. 安装与权限说明
 1. **自动配置**：运行 `install.exe`，它将自动识别路径并注册到 OpenCode。
