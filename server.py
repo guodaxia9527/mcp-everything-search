@@ -250,11 +250,17 @@ def search_everything(args):
     
     # --- ENHANCED DIAGNOSTICS & SELF-HEALING ---
     if num_results == 0:
-        # 1. Drive check with Shielding
-        path_hint = args.get("path", "").upper()
+        # 1. Check if path exists first (fixes false "Drive not indexed" error)
+        path_hint = args.get("path", "").strip()
+        if path_hint:
+            if not os.path.exists(path_hint):
+                return f"ERROR: Path '{path_hint}' does not exist. Please verify the directory path."
+        
+        # 2. Drive check with improved query (only if path exists)
         if path_hint and ":" in path_hint:
             drive = path_hint.split(":")[0] + ":"
-            if sdk.query_raw(f"path:\"{drive}\" limit:1") == 0:
+            # Use folder: instead of path: for reliable root directory check
+            if sdk.query_raw(f"folder:{drive}\\") == 0:
                 return f"ERROR: Drive {drive} is NOT indexed. Please add it in Everything Options -> Indexes -> NTFS/Folders.\n[SHIELD]: The disk is too large (millions of files). Standard OS commands (powershell, ls, dir) WILL HANG and TIMEOUT on this system. Please fix the Everything index instead."
 
         # 2. Expert Advice for AI
@@ -347,7 +353,8 @@ def get_engine_status():
     # Find all indexed drives
     drives = []
     for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        if sdk.query_raw(f"path:\"{d}:\\\" limit:1") > 0:
+        # Use folder: for reliable directory listing check
+        if sdk.query_raw(f"folder:{d}:\\") > 0:
             drives.append(f"{d}:")
     
     total = sdk.query_raw("*")
@@ -363,7 +370,7 @@ def handle_request(request):
     method = request.get("method")
     
     if method == "initialize":
-        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"capabilities": {"tools": {}}, "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.6.2-AUTOPILOT"}, "protocolVersion": "2024-11-05"}})
+        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"capabilities": {"tools": {}}, "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.6.4-BUGFIX"}, "protocolVersion": "2024-11-05"}})
     elif method == "tools/list":
         send_json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": [
             {

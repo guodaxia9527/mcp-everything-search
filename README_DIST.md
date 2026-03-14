@@ -14,7 +14,7 @@
 dist/
 ├── install.exe        # 一键安装/配置程序
 ├── server/            # MCP 服务核心
-│   ├── server.exe     # MCP 主程序 (v1.6.2-AUTOPILOT)
+│   ├── server.exe     # MCP 主程序 (v1.6.4-BUGFIX)
 │   ├── Everything.exe # 内置极速搜索引擎 (x64 绿色版)
 │   ├── Everything.lng # 引擎多语言支持
 │   ├── Everything64.dll # 原生 SDK 驱动
