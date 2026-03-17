@@ -1,6 +1,26 @@
 # [Windows Only / 仅限 Windows 平台]
 
 ### 🇺🇸 English Version
+#### v1.6.5 Performance & Stability Update
+- **Performance**: Added `Everything_SetMax` to limit results loaded into RAM (prevents memory overflow on large queries)
+- **Fixed**: Default limit now matches tool schema (20 instead of 100)
+- **Fixed**: Path now supports both forward slash (/) and backslash (\)
+- **Fixed**: Extension detection now correctly handles dots in folder names
+- **Fixed**: Unicode/Chinese characters now preserved in JSON output
+- **Improved**: Added result count header so AI knows when results are truncated
+
+### 🇨🇳 中文版
+#### v1.6.5 性能与稳定性更新
+- **性能优化**：添加 `Everything_SetMax` 限制加载到内存的结果数量（防止大查询导致内存溢出）
+- **修复**：默认 limit 现在与工具描述一致（20 而非 100）
+- **修复**：路径现在同时支持正斜杠 (/) 和反斜杠 (\)
+- **修复**：扩展名检测现在正确处理文件夹名中的点
+- **修复**：JSON 输出现在正确保留 Unicode/中文字符
+- **改进**：添加结果计数头部，让 AI 知道结果何时被截断
+
+---
+
+### 🇺🇸 English Version
 #### v1.6.4 Bugfix Release
 - **Fixed False Error**: Resolved issue where searching a non-existent path (e.g., `D:\Music`) incorrectly reported "Drive D: is NOT indexed"
 - **Improved Diagnostics**: Now correctly displays "Path does not exist" for invalid directories
