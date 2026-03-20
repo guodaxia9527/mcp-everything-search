@@ -25,9 +25,8 @@ EVERYTHING_REQUEST_DATE_CREATED = 0x00000020
 EVERYTHING_REQUEST_DATE_MODIFIED = 0x00000040
 EVERYTHING_REQUEST_DATE_ACCESSED = 0x00000080
 EVERYTHING_REQUEST_ATTRIBUTES = 0x00000100
-EVERYTHING_REQUEST_FOLDER_SIZE = 0x00000200  # 1.5 Alpha+
+EVERYTHING_REQUEST_FOLDER_SIZE = 0x00000200
 
-# Sorting Constants
 EVERYTHING_SORT_NAME_ASCENDING = 1
 EVERYTHING_SORT_NAME_DESCENDING = 2
 EVERYTHING_SORT_PATH_ASCENDING = 3
@@ -50,8 +49,6 @@ SORT_MAP = {
     "size-desc": EVERYTHING_SORT_SIZE_DESCENDING,
     "extension-asc": EVERYTHING_SORT_EXTENSION_ASCENDING,
     "extension-desc": EVERYTHING_SORT_EXTENSION_DESCENDING,
-    "date-created-asc": EVERYTHING_SORT_DATE_CREATED_ASCENDING,
-    "date-created-desc": EVERYTHING_SORT_DATE_CREATED_DESCENDING,
     "date-modified-asc": EVERYTHING_SORT_DATE_MODIFIED_ASCENDING,
     "date-modified-desc": EVERYTHING_SORT_DATE_MODIFIED_DESCENDING,
 }
@@ -77,8 +74,9 @@ ENGINE_PATHS = [
     os.path.join(BASE_DIR, "_internal", "everything.exe")
 ]
 
-# [FIX #1] Default limit reduced from 100 to 20 to match tool description
 DEFAULT_SEARCH_LIMIT = 20
+# [OPT] Max results stats will scan before aggregating — prevents OOM on huge drives
+STATS_SCAN_LIMIT = 200_000
 
 
 class EverythingSDK:
@@ -93,7 +91,6 @@ class EverythingSDK:
                     break
                 except Exception as e:
                     logging.error(f"Failed to load DLL from {path}: {str(e)}")
-
         if not self.lib:
             logging.error("Everything64.dll not found.")
 
@@ -112,8 +109,6 @@ class EverythingSDK:
         self.lib.Everything_GetLastError.restype = ctypes.c_uint32
         self.lib.Everything_GetMajorVersion.restype = ctypes.c_uint32
         self.lib.Everything_GetMinorVersion.restype = ctypes.c_uint32
-
-        # [PERF #1] Set result offset/max to avoid fetching millions of results into memory
         self.lib.Everything_SetMax.argtypes = [ctypes.c_uint32]
         self.lib.Everything_SetOffset.argtypes = [ctypes.c_uint32]
 
@@ -152,39 +147,40 @@ class EverythingSDK:
                     logging.error(f"Launch failed: {str(e)}")
         return False
 
-    def query_raw(self, search_text, sort_type=None, request_flags=EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME, max_results=None):
-        """
-        Execute a query against the Everything engine.
-        [PERF #1] max_results: if set, calls Everything_SetMax to limit results fetched into memory.
-        [FIX #2] Removed stray 'limit' kwarg that was silently ignored in the original.
-        """
+    def query_raw(self, search_text, sort_type=None,
+                  request_flags=EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME,
+                  max_results=None):
         if not self.is_available():
             return 0
         self.lib.Everything_SetSearchW(search_text)
         self.lib.Everything_SetRequestFlags(request_flags)
         if sort_type:
             self.lib.Everything_SetSort(sort_type)
-        # [PERF #1] Limit results loaded into RAM when we only need a count or a small slice
-        if max_results is not None:
-            try:
-                self.lib.Everything_SetMax(max_results)
-            except Exception:
-                pass  # SDK version may not support it; degrade gracefully
+        # [BUGFIX] Everything SDK is stateful: SetMax persists across queries.
+        # A previous search with max_results=20 silently caps subsequent stats
+        # queries. Always set explicitly: requested limit, or 0xFFFFFFFF to reset.
+        try:
+            self.lib.Everything_SetMax(max_results if max_results is not None else 0xFFFFFFFF)
+        except Exception:
+            pass
         if not self.lib.Everything_QueryW(True):
             return 0
         return self.lib.Everything_GetNumResults()
 
 
-# Initialize
 sdk = EverythingSDK(DLL_PATHS)
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def filetime_to_iso(ft):
     if ft == 0 or ft == 0xFFFFFFFFFFFFFFFF:
         return "Unknown"
     try:
         dt = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ft // 10)
-        return dt.isoformat()
+        return dt.astimezone().isoformat()
     except:
         return "Unknown"
 
@@ -201,22 +197,35 @@ def format_size(size):
     return f"{size:.2f} PB"
 
 
-def build_smart_query(params):
-    """
-    Assembles a semantic query from structured fields.
-    Robustness: Expert query preserved; Filename auto-wrapped in wildcards for reliability.
-    """
-    parts = []
+def ok(data):
+    """Return a successful structured JSON result."""
+    return json.dumps({"status": "ok", **data}, ensure_ascii=False, indent=2)
 
-    # 1. Base query (Expert Mode) - Preserve everything including wildcards
+
+def err(message, hint=None):
+    """
+    [OPT-STABILITY] Unified error envelope.
+    Structured errors let any model parse failure reason reliably
+    without regex-ing free text.
+    """
+    payload = {"status": "error", "message": message}
+    if hint:
+        payload["hint"] = hint
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Query builder
+# ---------------------------------------------------------------------------
+
+def build_smart_query(params):
+    parts = []
     base_query = params.get("query", "").strip()
     if base_query and base_query != "*":
         parts.append(base_query)
 
-    # 2. Semantic fields (Filename, Extension, Path)
     filename = params.get("filename", "").strip()
     if filename:
-        # If no wildcards and not a regex hint, wrap in * for fuzzy matching
         if "*" not in filename and "?" not in filename and "regex:" not in filename:
             filename = f"*{filename}*"
         parts.append(filename)
@@ -227,18 +236,15 @@ def build_smart_query(params):
 
     path_limit = params.get("path", "").strip()
     if path_limit:
-        # [FIX #3] Normalize Windows path separators; support both / and \
         path_limit = path_limit.replace("/", "\\")
         if ":" in path_limit and not path_limit.endswith("\\"):
             path_limit += "\\"
-        # Use quotes for paths with spaces
         parts.append(f"path:\"{path_limit}\"")
 
-    return " ".join(parts)
+    return " ".join(parts) if parts else "*"
 
 
 def parse_structured_params(params, raw_args=""):
-    # [FIX #1] Use DEFAULT_SEARCH_LIMIT (20) to match the tool schema default
     limit = params.get("limit", DEFAULT_SEARCH_LIMIT)
     sort_type = params.get("sort")
     flags = EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME
@@ -276,109 +282,147 @@ def parse_structured_params(params, raw_args=""):
     return {"limit": limit, "sort": actual_sort, "flags": flags}
 
 
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
 def search_everything(args):
     if not sdk.ensure_engine(ENGINE_PATHS):
-        return "Everything engine is NOT running."
+        return err("Everything engine is not running.",
+                   hint="Start Everything.exe manually or check ENGINE_PATHS config.")
 
     query_text = build_smart_query(args)
     if not query_text:
-        return "Query is empty."
+        return err("Query is empty.", hint="Provide at least one of: query, filename, extension, path.")
 
     p = parse_structured_params(args, args.get("raw_args", ""))
 
-    # PERFORMANCE WARNING & INTENT INTERCEPTION
-    perf_prefix = ""
+    # [OPT] Warn but still execute — don't block, just inform
+    warnings = []
     if p["limit"] > 1000:
-        perf_prefix = (
-            "WARNING: Requesting a large result limit is inefficient for AI. "
-            "For counting or finding top folders, ALWAYS use 'everything_stats' instead.\n\n"
+        warnings.append(
+            "Large limit detected. For counting or folder aggregation use 'everything_stats' instead."
         )
 
-    # [AUTOPILOT]: Intercept size-based ranking intent
+    # [OPT] Guide toward better tool, but still return results
     if p["sort"] in [EVERYTHING_SORT_SIZE_ASCENDING, EVERYTHING_SORT_SIZE_DESCENDING] and p["limit"] <= 100:
-        perf_prefix += (
-            "[SYSTEM GUIDANCE]: Detected size ranking intent. Note that 'everything_search' returns individual files. "
-            "If you are looking for the 'largest FOLDERS', please use the dedicated 'find_largest_folders' tool "
-            "for instant, accurate directory aggregation.\n\n"
+        warnings.append(
+            "Sorting files by size returns individual files. "
+            "To find the largest FOLDERS use 'find_largest_folders' for accurate directory totals."
         )
 
     v = sdk.get_version()
     if v[0] >= 1 and v[1] >= 5:
-        if "folder:" in query_text or (p["sort"] in [EVERYTHING_SORT_SIZE_ASCENDING, EVERYTHING_SORT_SIZE_DESCENDING]):
+        if "folder:" in query_text or p["sort"] in [EVERYTHING_SORT_SIZE_ASCENDING, EVERYTHING_SORT_SIZE_DESCENDING]:
             p["flags"] |= EVERYTHING_REQUEST_FOLDER_SIZE
 
-    # [PERF #1] Pass limit to query_raw so Everything only loads what we need into RAM
-    num_results = sdk.query_raw(query_text, sort_type=p["sort"], request_flags=p["flags"], max_results=p["limit"])
+    num_results = sdk.query_raw(query_text, sort_type=p["sort"],
+                                request_flags=p["flags"], max_results=p["limit"])
 
-    # --- ENHANCED DIAGNOSTICS & SELF-HEALING ---
     if num_results == 0:
-        # 1. Check if path exists first (fixes false "Drive not indexed" error)
-        path_hint = args.get("path", "").strip()
-        if path_hint:
-            if not os.path.exists(path_hint):
-                return f"ERROR: Path '{path_hint}' does not exist. Please verify the directory path."
+        return _handle_zero_results(args, query_text)
 
-        # 2. Drive check with improved query (only if path exists)
-        if path_hint and ":" in path_hint:
-            drive = path_hint.split(":")[0] + ":"
-            if sdk.query_raw(f"folder:{drive}\\") == 0:
-                return (
-                    f"ERROR: Drive {drive} is NOT indexed. "
-                    "Please add it in Everything Options -> Indexes -> NTFS/Folders.\n"
-                    "[SHIELD]: The disk is too large (millions of files). Standard OS commands "
-                    "(powershell, ls, dir) WILL HANG and TIMEOUT on this system. "
-                    "Please fix the Everything index instead."
+    results = _collect_results(num_results, p)
+
+    # [OPT-STABILITY] Always structured JSON — models parse this reliably
+    # total_files_found = complete count from index, regardless of 'results_returned'
+    # counting_tip = explicit guidance so models never increase limit just to count
+    payload = {
+        "query": query_text,
+        "total_files_found": num_results,
+        "results_returned": len(results),
+        "truncated": num_results > len(results),
+        "counting_tip": (
+            "Use 'total_files_found' for the exact file count. "
+            "Do NOT increase 'limit' just to count — it wastes memory. "
+            "For multi-extension counting, call 'everything_stats' instead."
+        ),
+        "results": results,
+    }
+    if warnings:
+        payload["warnings"] = warnings
+
+    return ok(payload)
+
+
+def _handle_zero_results(args, query_text):
+    """
+    [OPT] Separated from main search path for clarity.
+    Returns structured error with actionable hints.
+    """
+    path_hint = args.get("path", "").strip()
+
+    if path_hint and not os.path.exists(path_hint):
+        return err(
+            f"Path '{path_hint}' does not exist.",
+            hint="Verify the directory path before searching."
+        )
+
+    if path_hint and ":" in path_hint:
+        drive = path_hint.split(":")[0] + ":"
+        if sdk.query_raw(f"folder:{drive}\\") == 0:
+            return err(
+                f"Drive {drive} is not indexed by Everything.",
+                hint="Add it in Everything Options → Indexes → NTFS/Folders."
+            )
+
+    hints = []
+    if "*" in query_text:
+        hints.append("Try removing wildcards — Everything uses fuzzy matching by default.")
+    if args.get("path") or args.get("extension"):
+        raw_name = args.get("filename", "") or args.get("query", "")
+        if raw_name and raw_name != "*":
+            alt_count = sdk.query_raw(raw_name.replace("*", ""))
+            if alt_count > 0:
+                hints.append(
+                    f"File exists elsewhere: unfiltered search found {alt_count} match(es). "
+                    "Try removing the path or extension filter."
                 )
 
-        # 3. Expert Advice for AI
-        advice = [f"Found 0 results for: '{query_text}'."]
-        if "*" in query_text:
-            advice.append("Hint: Try removing wildcards (*) as Everything uses fuzzy matching by default.")
-        if args.get("path") or args.get("extension"):
-            raw_name = args.get("filename", "") or args.get("query", "")
-            if raw_name and raw_name != "*":
-                # [FIX #2] query_raw does NOT accept a 'limit' kwarg — removed stray argument
-                alt_count = sdk.query_raw(raw_name.replace("*", ""))
-                if alt_count > 0:
-                    advice.append(
-                        f"Note: This file exists in OTHER locations "
-                        f"(unfiltered search found {alt_count} matches). "
-                        "Try removing path/extension filters."
-                    )
-
-        return "\n".join(advice)
-
-    return perf_prefix + render_results(num_results, p)
+    return ok({
+        "query": query_text,
+        "total_files_found": 0,
+        "results_returned": 0,
+        "truncated": False,
+        "results": [],
+        "hints": hints if hints else ["No files matched. Try a broader query."],
+    })
 
 
-def render_results(num_results, p):
+def _collect_results(num_results, p):
+    """Build the result list from Everything SDK results."""
     actual_limit = min(num_results, p["limit"])
-    lines = []
     path_buf = ctypes.create_unicode_buffer(32768)
     size_val = ctypes.c_uint64()
     date_val = ctypes.c_uint64()
+    results = []
 
     for i in range(actual_limit):
-        parts = []
+        item = {}
+        sdk.lib.Everything_GetResultFullPathNameW(i, path_buf, 32768)
+        item["path"] = path_buf.value
+
         if p["flags"] & EVERYTHING_REQUEST_SIZE:
             if sdk.lib.Everything_GetResultSize(i, ctypes.byref(size_val)):
-                parts.append(f"[{format_size(size_val.value)}]")
+                item["size"] = format_size(size_val.value)
+                item["size_bytes"] = size_val.value
+
         if p["flags"] & EVERYTHING_REQUEST_DATE_MODIFIED:
             if sdk.lib.Everything_GetResultDateModified(i, ctypes.byref(date_val)):
-                parts.append(f"[{filetime_to_iso(date_val.value)}]")
+                item["date_modified"] = filetime_to_iso(date_val.value)
 
-        sdk.lib.Everything_GetResultFullPathNameW(i, path_buf, 32768)
-        parts.append(path_buf.value)
-        lines.append("  ".join(parts))
+        results.append(item)
 
-    # [FIX #4] Always show actual result count so AI knows when results were truncated
-    header = f"Showing {actual_limit} of {num_results} result(s).\n"
-    return header + "\n".join(lines)
+    return results
 
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
 
 def get_stats(query, group_by="directory", sort_by="count", limit=10):
     if not sdk.ensure_engine(ENGINE_PATHS):
-        return "Everything engine is NOT running."
+        return err("Everything engine is not running.")
 
     flags = EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME | EVERYTHING_REQUEST_SIZE
     v = sdk.get_version()
@@ -390,15 +434,20 @@ def get_stats(query, group_by="directory", sort_by="count", limit=10):
         sort_type=EVERYTHING_SORT_SIZE_DESCENDING if sort_by == "size" else None,
         request_flags=flags,
     )
+
     if num_results == 0:
-        return "No matches."
+        return ok({"query": query, "group_by": group_by, "sort_by": sort_by, "results": []})
 
     counts = Counter()
     sizes = defaultdict(int)
     path_buf = ctypes.create_unicode_buffer(32768)
     size_val = ctypes.c_uint64()
 
-    process_limit = min(num_results, 1_000_000)
+    # [BUGFIX] Original had return inside loop — fixed: collect all, then return
+    # [OPT] Cap scan at STATS_SCAN_LIMIT to prevent OOM on massive drives
+    process_limit = min(num_results, STATS_SCAN_LIMIT)
+    scanned = 0
+
     for i in range(process_limit):
         sdk.lib.Everything_GetResultFullPathNameW(i, path_buf, 32768)
         full_path = path_buf.value
@@ -406,8 +455,6 @@ def get_stats(query, group_by="directory", sort_by="count", limit=10):
         if group_by == "directory":
             key = full_path.rsplit('\\', 1)[0] if '\\' in full_path else full_path
         else:
-            # [FIX #5] Correct extension detection: use os.path.splitext to avoid
-            # matching dots inside folder names (e.g. "C:\my.project\file" -> ".project")
             _, ext = os.path.splitext(full_path)
             key = ext.lower() if ext else "(no ext)"
 
@@ -416,45 +463,254 @@ def get_stats(query, group_by="directory", sort_by="count", limit=10):
             if s != 0xFFFFFFFFFFFFFFFF:
                 sizes[key] += s
         counts[key] += 1
+        scanned += 1
 
     sorted_keys = sorted(
         sizes.items() if sort_by == "size" else counts.items(),
         key=lambda x: x[1],
         reverse=True,
     )
-    res = []
+
+    results = []
     for key, _ in sorted_keys[:limit]:
-        res.append({
+        results.append({
             "label": key,
-            "count": counts[key],
-            "size_human": format_size(sizes[key]),
-            "size_bytes": sizes[key],
+            "file_count": counts[key],
+            "total_size": format_size(sizes[key]),
+            "total_size_bytes": sizes[key],
         })
-    return json.dumps(res, indent=2, ensure_ascii=False)
+
+    unique_groups = len(sorted_keys)
+
+    return ok({
+        "query": query,
+        "group_by": group_by,
+        "sort_by": sort_by,
+        "total_files_found": num_results,
+        "scanned": scanned,
+        "truncated_scan": num_results > scanned,
+        "unique_groups_found": unique_groups,
+        "results_truncated": unique_groups > limit,
+        "counting_tip": (
+            "'total_files_found' is the definitive count for this query. "
+            "No need to run 'everything_search' to verify — this number is authoritative. "
+            "If 'results_truncated' is false, the results list is complete — "
+            "few results means few matching groups, not a data quality issue."
+        ),
+        "size_note": "Size reflects direct child files only, not recursive folder totals.",
+        "results": results,
+    })
 
 
-def send_json(data):
-    sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
-    # [FIX #6] ensure_ascii=False preserves Chinese/Unicode in JSON output
-    sys.stdout.flush()
-
+# ---------------------------------------------------------------------------
+# Engine status
+# ---------------------------------------------------------------------------
 
 def get_engine_status():
     if not sdk.ensure_engine(ENGINE_PATHS):
-        return "Engine NOT running."
+        return err("Engine not running.")
     v = sdk.get_version()
     drives = []
     for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         if sdk.query_raw(f"folder:{d}:\\") > 0:
             drives.append(f"{d}:")
-
     total = sdk.query_raw("*")
-    return {
+    return ok({
         "version": f"{v[0]}.{v[1]}",
         "indexed_drives": drives,
-        "total_files": total,
-        "status": "Healthy",
-    }
+        "total_indexed_files": total,
+        "engine_status": "healthy",
+    })
+
+
+# ---------------------------------------------------------------------------
+# MCP protocol
+# ---------------------------------------------------------------------------
+
+# [OPT] Tool definitions extracted to a constant — easier to maintain and read
+TOOLS = [
+    {
+        "name": "everything_search",
+        "description": (
+            "Search for files and folders by name, extension, or location. "
+            "Use this when you need to FIND specific files or get the top N largest/newest files. "
+            "NOT suitable for counting files or summarizing folder sizes — use 'everything_stats' for that.\n"
+            "COUNTING TIP: 'total_files_found' in the response is ALWAYS the complete index count, "
+            "independent of 'limit'. To count files of a type, use limit=1 and read 'total_files_found' — "
+            "do NOT increase limit to millions just to count. "
+            "For counting multiple extensions at once, use 'everything_stats'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Raw Everything search syntax (e.g. 'dm:today'). "
+                        "Use only when semantic fields below are not enough."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "File name to search for. Partial names are fine — wildcards added automatically. "
+                        "Example: 'report' matches 'Q3_report_final.xlsx'."
+                    ),
+                },
+                "extension": {
+                    "type": "string",
+                    "description": "File extension without dot. Example: 'mp4', 'pdf', 'docx'.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Limit search to this folder. "
+                        "Example: 'D:\\\\Projects' or 'D:/Projects' (both work)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of results to return. Default 20. Keep under 100 for speed.",
+                    "default": DEFAULT_SEARCH_LIMIT,
+                },
+                "sort": {
+                    "type": "string",
+                    "description": (
+                        "Sort order. Use 'size-desc' to find largest files. "
+                        "Use 'date-modified-desc' to find most recently changed files."
+                    ),
+                    "enum": [
+                        "name-asc", "name-desc",
+                        "path-asc", "path-desc",
+                        "size-asc", "size-desc",
+                        "date-modified-asc", "date-modified-desc",
+                    ],
+                },
+                "show_size": {
+                    "type": "boolean",
+                    "description": "Include file size in results.",
+                },
+                "show_date": {
+                    "type": "boolean",
+                    "description": "Include last-modified date in results.",
+                },
+                "raw_args": {
+                    "type": "string",
+                    "description": "Advanced: raw CLI flags (e.g. '-n 50 -sort size-desc'). Rarely needed.",
+                },
+            },
+        },
+    },
+    {
+        "name": "everything_stats",
+        "description": (
+            "FIRST CHOICE for any counting or aggregation task. "
+            "Use this when the user asks: 'how many X files do I have?', "
+            "'which folder has the most files?', 'what file types take the most space?'. "
+            "The 'total_files_found' field in the response is the definitive count — "
+            "do NOT follow up with 'everything_search' to verify it.\n"
+            "MULTI-EXTENSION: call this tool once per extension and sum the results. "
+            "Do NOT combine extensions with semicolons or commas in query — "
+            "use 'ext:pdf' for PDF, 'ext:xlsx' for Excel, etc."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Filter which files to aggregate. Default '*' means all files. "
+                        "Example: 'ext:mp4' to aggregate only videos. "
+                        "Tip: add '-C:\\\\Windows' to exclude system files."
+                    ),
+                    "default": "*",
+                },
+                "group_by": {
+                    "type": "string",
+                    "enum": ["directory", "extension"],
+                    "description": "'directory' groups by folder. 'extension' groups by file type.",
+                    "default": "directory",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["count", "size"],
+                    "description": "'count' ranks by number of files. 'size' ranks by total disk usage.",
+                    "default": "count",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "How many top results to return.",
+                    "default": 10,
+                },
+            },
+        },
+    },
+    {
+        "name": "find_largest_folders",
+        "description": (
+            "Find the folders taking the most disk space. "
+            "Use this when the user asks: 'what's eating my disk?', "
+            "'which folders are largest?', 'help me free up space'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Leave empty to search ALL indexed drives at once. "
+                        "Only set this to limit search to one specific drive or folder. "
+                        "Example: 'C:\\\\' for whole C drive, 'D:\\\\Projects' for a subfolder."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of folders to return.",
+                    "default": 5,
+                },
+            },
+        },
+    },
+    {
+        "name": "find_most_files",
+        "description": (
+            "Find folders containing the highest number of files. "
+            "Use this when the user asks: 'where are files piling up?', "
+            "'which folder has the most files?'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Leave empty to search ALL indexed drives at once. "
+                        "Only set this to limit to one specific drive or folder. "
+                        "Example: 'D:\\\\'."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of folders to return.",
+                    "default": 5,
+                },
+            },
+        },
+    },
+    {
+        "name": "get_engine_status",
+        "description": (
+            "Check if Everything engine is running, which drives are indexed, "
+            "and total file count. Call this first if search returns unexpected errors."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+
+def send_json(data):
+    sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
 
 
 def handle_request(request):
@@ -467,139 +723,13 @@ def handle_request(request):
             "id": req_id,
             "result": {
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.6.5"},
+                "serverInfo": {"name": "Everything-AllInOne-PRO", "version": "1.7.3"},
                 "protocolVersion": "2024-11-05",
             },
         })
 
     elif method == "tools/list":
-        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": [
-            {
-                "name": "everything_search",
-                "description": (
-                    "Find specific files. ULTRA-FAST. Use semantic fields (filename, extension) "
-                    "instead of guessing syntax. DO NOT use this for counting files or finding "
-                    "'top' folders."
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query. Everything syntax supported (e.g. 'dm:today').",
-                        },
-                        "filename": {
-                            "type": "string",
-                            "description": "Preferred: File name part to match (auto-wrapped in *).",
-                        },
-                        "extension": {
-                            "type": "string",
-                            "description": "Preferred: Filter by extension (e.g. 'mp4', 'docx').",
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "Optional: Restrict to directory (e.g. 'D:\\backup'). Forward slashes also accepted.",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Max results. Keep LOW (<100) for efficiency. Do NOT use huge limits to count files.",
-                            "default": DEFAULT_SEARCH_LIMIT,
-                        },
-                        "sort": {
-                            "type": "string",
-                            "enum": [
-                                "name-asc", "name-desc",
-                                "path-asc", "path-desc",
-                                "size-asc", "size-desc",
-                                "date-modified-asc", "date-modified-desc",
-                            ],
-                        },
-                        "show_size": {"type": "boolean"},
-                        "show_date": {"type": "boolean"},
-                        "raw_args": {"type": "string"},
-                    },
-                },
-            },
-            {
-                "name": "everything_stats",
-                "description": (
-                    "CRITICAL for 'Top N' or counting tasks (e.g. 'most files', 'largest folders'). "
-                    "1000x faster than manual counting. ALWAYS use this for aggregation."
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Filter files before aggregating. Tip: use '-C:\\Windows' to hide system clutter.",
-                            "default": "*",
-                        },
-                        "group_by": {
-                            "type": "string",
-                            "enum": ["directory", "extension"],
-                            "description": "How to group files.",
-                        },
-                        "sort_by": {
-                            "type": "string",
-                            "enum": ["count", "size"],
-                            "description": "Sort metric.",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Max categories to return.",
-                            "default": 10,
-                        },
-                    },
-                },
-            },
-            {
-                "name": "find_largest_folders",
-                "description": (
-                    "Find the largest directories on disk. "
-                    "Much faster and more accurate than manual search."
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Scope the search to this directory (e.g. 'C:\\').",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Number of folders to return.",
-                            "default": 5,
-                        },
-                    },
-                },
-            },
-            {
-                "name": "find_most_files",
-                "description": (
-                    "Find directories containing the highest number of files. "
-                    "Useful for finding file hoards."
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Scope the search to this directory (e.g. 'D:\\').",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Number of folders to return.",
-                            "default": 5,
-                        },
-                    },
-                },
-            },
-            {
-                "name": "get_engine_status",
-                "description": "Check which drives are currently indexed and engine health.",
-                "inputSchema": {"type": "object", "properties": {}},
-            },
-        ]}})
+        send_json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}})
 
     elif method == "tools/call":
         params = request.get("params", {})
@@ -616,19 +746,20 @@ def handle_request(request):
                     args.get("limit", 10),
                 )
             elif tool_name == "find_largest_folders":
-                # [FIX #7] Use '*' as fallback when no path given, not the literal string '*'
-                # wrapped in path: which produces an invalid query
                 path_arg = args.get("path", "").strip()
                 q = f"path:\"{path_arg}\"" if path_arg else "*"
-                result = get_stats(q, group_by="directory", sort_by="size", limit=args.get("limit", 5))
+                result = get_stats(q, group_by="directory", sort_by="size",
+                                   limit=args.get("limit", 5))
             elif tool_name == "find_most_files":
                 path_arg = args.get("path", "").strip()
                 q = f"path:\"{path_arg}\"" if path_arg else "*"
-                result = get_stats(q, group_by="directory", sort_by="count", limit=args.get("limit", 5))
+                result = get_stats(q, group_by="directory", sort_by="count",
+                                   limit=args.get("limit", 5))
             elif tool_name == "get_engine_status":
-                result = json.dumps(get_engine_status(), indent=2, ensure_ascii=False)
+                result = get_engine_status()
             else:
-                result = f"Unknown tool: {tool_name}"
+                result = err(f"Unknown tool: {tool_name}",
+                             hint=f"Available tools: {[t['name'] for t in TOOLS]}")
 
             send_json({
                 "jsonrpc": "2.0",
