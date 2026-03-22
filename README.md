@@ -6,6 +6,8 @@
 
 [中文版](#chinese-version) | [English Version](#english-version)
 
+[![mcp-everything-search MCP server](https://glama.ai/mcp/servers/guodaxia9527/mcp-everything-search/badges/card.svg)](https://glama.ai/mcp/servers/guodaxia9527/mcp-everything-search)
+
 ---
 
 <a name="chinese-version"></a>
